@@ -130,7 +130,7 @@ def save_reviews(data: list, file_path: str = OUTPUT_FILE):
 
 
 def get_filters(session):
-    logger.info("Получаем список доступных услуг...")
+    logger.info("Находим все доступные фильтры(услуги)")
 
     try:
         response = session.get(START_URL, timeout=30, verify=True)
@@ -181,7 +181,7 @@ def get_filters(session):
 
 
 def fetch_reviews_for_service(service_name, product_code, all_reviews, session):
-    logger.info(f"=== Сбор отзывов для: {service_name} ===")
+    logger.info(f"Сбор отзывов для: {service_name}")
 
     page = 1
     service_reviews_count = 0
@@ -288,7 +288,6 @@ def main():
 
     finally:
         session.close()
-
 
 if __name__ == "__main__":
     main()
