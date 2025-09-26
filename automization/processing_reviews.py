@@ -304,7 +304,7 @@ def process_all_unprocessed_reviews():
         win.show()
         app.exec_()
 
-        lr = col_raw.find_one({"_id": raw_doc["id"]})
+        lr = col_raw.find_one({"_id": raw_doc["_id"]})
         if lr.get("last_labeled_id"):
             print(f"Смотрим {raw_doc['id']} labeled: {lr['last_labeled_id']}")
         else:
