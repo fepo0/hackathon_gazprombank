@@ -418,3 +418,4 @@ if __name__ == "__main__":
     process_all_unprocessed_reviews()
     process_verification_phase()
     print("Все завершено")
+
