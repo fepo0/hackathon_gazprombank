@@ -1,0 +1,6 @@
+requests
+beautifulsoup4
+pymongo
+python-dotenv
+selenium
+webdriver-manager
