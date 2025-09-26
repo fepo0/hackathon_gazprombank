@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 
 from datetime import datetime
 from dateutil import tz
@@ -54,19 +55,20 @@ def now_iso():
 def take_next_unprocessed():
     doc = col_raw.find_one_and_update(
         {"status": "unprocessed"},
-        {"$set": {"status": "in_processed",
+        {"$set": {"status": "in_progress",
                   "in_progress_by": user,
                   "in_progress_at": now_iso()
-                  }},
+                 }},
+        sort=[("date", 1)]
     )
     return doc
 
 def mark_raw_processed(raw_id):
     col_raw.update_one(
-        {"id": raw_id},
+        {"_id": raw_id},
         {"$set": {"status": "processed",
                   "processed_at": now_iso()
-                  }}
+                 }}
     )
 
 def ensure_topics_and_sentiments_loaded():
@@ -81,7 +83,7 @@ def ensure_topics_and_sentiments_loaded():
 def save_labeled(raw_doc, selected_topics_names, selected_sentiments_labels):
     assert len(selected_topics_names) == len(selected_sentiments_labels)
     labeled = {
-        "raw_review_id": raw_doc["id"],
+        "raw_review_id": raw_doc["_id"],
         "text": raw_doc.get("text", ""),
         "title": raw_doc.get("title", ""),
         "topics": selected_topics_names,
@@ -94,54 +96,24 @@ def save_labeled(raw_doc, selected_topics_names, selected_sentiments_labels):
     labeled_id = res.inserted_id
     print(f"Сохранен обработанный отзыв {labeled_id}")
 
+    col_raw.update_one({"_id": raw_doc["_id"]},
+                       {"$set": {"last_labeled_id": labeled_id, "status": "in_progress"}})
+
     for topic_name in selected_topics_names:
         topic_doc = col_topics.find_one({"name": topic_name})
-        cluster_update = False
+        cluster_updated = False
+        if topic_doc and topic_doc.get("cluster_id") is not None:
+            col_clusters.update_one({"cluster_id": topic_doc["cluster_id"]},
+                                    {"$addToSet": {"example_reviews": labeled_id}})
+            cluster_updated = True
 
-        if topic_doc:
-            t_cluster_id = topic_doc.get("cluster_id")
-            if t_cluster_id is not None:
-                upd = col_clusters.update_one(
-                    {"cluster_id": t_cluster_id},
-                    {"$addToSet": {"example_reviews": labeled_id}},
-                )
-                if upd.modified_count > 0 or upd.matched_count > 0:
-                    cluster_update = True
+        if not cluster_updated:
+            col_clusters.update_one({"name": {"$regex": f"^{re.escape(topic_name)}$", "$options": "i"}},
+                                    {"$addToSet": {"example_reviews": labeled_id}})
 
-        if not cluster_update:
-            upd = col_clusters.update_one(
-                {"name": {"$regex": f"^{topic_name}$",
-                          "$options": "i"}},
-                {"$addToSet": {"example_reviews": labeled_id}},
-            )
-            if upd.modified_count > 0 or upd.matched_count > 0:
-                cluster_update = True
-
-        if not cluster_update:
-            upd = col_clusters.update_one(
-                {"keywords": {"$elemMatch": {"$regex": f"^{topic_name}$",
-                                             "$options": "i"}}},
-                {"$addToSet": {"example_reviews": labeled_id}},
-            )
-            if upd.modified_count > 0 or upd.matched_count > 0:
-                cluster_update = True
-
-        if not cluster_update and topic_doc:
-            try:
-                tid_str = str(topic_doc["_id"])
-                upd = col_topics.update_one(
-                    {"cluster_id": tid_str},
-                    {"$addToSet": {"example_reviews": labeled_id}},
-                )
-                if upd.modified_count > 0 or upd.matched_count > 0:
-                    cluster_update = True
-            except Exception as e:
-                pass
-
-        if cluster_update:
-            print(f"Добавлен labeled_id в кластер для услуги(товара) {topic_name}")
-        else:
-            print(f"Не найдено подходящего кластера для темы {topic_name}")
+        if not cluster_updated:
+            col_clusters.update_one({"keywords": {"$elemMatch": {"$regex": re.escape(topic_name), "$options": "i"}}},
+                                    {"$addToSet": {"example_reviews": labeled_id}})
 
     return labeled_id
 
@@ -281,35 +253,32 @@ class LabelinngWindow(QtWidgets.QWidget):
                 btn.setChecked(True)
                 return
 
-    def coolect_result(self):
-        topics = list(self.topics_order)
+    def collect_result(self):
+        topics = list(self.selected_order)
         sentiments = []
         for t in topics:
             bg = self.topic_sentiments.get(t)
-            choice = None
+            chosen = None
             if bg:
-                for bth in bg.buttons():
-                    if bth.isChecked():
-                        choice = bth.text()
+                for btn in bg.buttons():
+                    if btn.isChecked():
+                        chosen = btn.text()
                         break
-            sentiments.append(choice or "")
+            sentiments.append(chosen or "")
         return topics, sentiments
 
     def on_save(self):
-        topics, sentiments = self.coolect_result()
+        topics, sentiments = self.collect_result()
         if not topics:
             QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите хотя бы 1 услугу (товар)")
             return
         if any(s == "" for s in sentiments):
-            QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите тональность для каждой услуги (тоавра)")
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите тональность для каждой услуги (товара)")
             return
 
         try:
             labeled_id = save_labeled(self.raw, topics, sentiments)
-            col_raw.update_one(
-                {"_id": self.raw["id"]},
-                {"$set": {"last_labeled_id": labeled_id}}
-            )
+            col_raw.update_one({"_id": self.raw["_id"]}, {"$set": {"last_labeled_id": labeled_id}})
             QtWidgets.QMessageBox.information(self, "Сохранено", f"Обработка сохранена (id {labeled_id})")
             self.close()
         except Exception as e:
@@ -379,53 +348,45 @@ def process_all_unprocessed_reviews():
 
     print("Готово. Все кейсы обработаны и проверены")
 
-class UpdateLabelinngWindow(LabelinngWindow):
+class UpdateLabelingWindow(LabelinngWindow):  # или LabelingWindow если переименовали
     def __init__(self, raw_doc, topics_list, sentiments_list, labeled_doc):
-        super().__init__(raw_doc,
-                         topics_list,
-                         sentiments_list,
-                         prefill={"topics": labeled_doc.get("topics", []),
-                                  "sentiments": labeled_doc.get("sentiments", [])})
+        # prefill — используем existing topics/sentiments
+        super().__init__(raw_doc, topics_list, sentiments_list, prefill={"topics": labeled_doc.get("topics", []), "sentiments": labeled_doc.get("sentiments", [])})
         self.labeled_doc = labeled_doc
 
     def on_save(self):
-        topics, sentiments = self.coolect_result()
+        topics, sentiments = self.collect_result()
         if not topics:
             QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите хотя бы 1 услугу (товар)")
             return
-        if any(s == " " for s in sentiments):
+        if any(s == "" for s in sentiments):
             QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите тональность для каждой услуги (товара)")
             return
 
         try:
+            # Обновляем существующую запись (вместо вставки)
             col_labeled.update_one(
-                {"_id": self.labeled_doc["id"]},
-                {"$set":{
-                    "topics": sentiments,
+                {"_id": self.labeled_doc["_id"]},
+                {"$set": {
+                    "topics": topics,
                     "sentiments": sentiments,
-                    "labeled_by": self.labeled_doc.get("labeled_by", ""),
-                    "labeled_at": self.labeled_doc.get("labeled_at", now_iso()),
                     "status": "verified",
                     "verified_by": user,
                     "verified_at": now_iso()
                 }}
             )
+            # добавим labeled_id в кластеры (как при сохранении)
             labeled_id = self.labeled_doc["_id"]
             for topic_name in topics:
                 topic_doc = col_topics.find_one({"name": topic_name})
-                cluster_updated = False
-                if topic_doc:
-                    t_cluster_id = topic_doc.get("cluster_id")
-                    if t_cluster_id is not None:
-                        col_clusters.update_one({"cluster_id": t_cluster_id},
-                                                {"$addToSet": {"example_reviews": labeled_id}})
-                        cluster_updated = True
-                    if not cluster_updated:
-                        col_clusters.update_one({"name": {"$regex": f"^{topic_name}$", "$options": "i"}},
-                                                {"$addToSet": {"example_reviews": labeled_id}})
-            col_raw.update_one({"_id": self.raw["_id"]},
-                               {"$set": {"status": "processed",
-                                         "processed_at": now_iso()}})
+                if topic_doc and topic_doc.get("cluster_id") is not None:
+                    col_clusters.update_one({"cluster_id": topic_doc["cluster_id"]}, {"$addToSet": {"example_reviews": labeled_id}})
+                else:
+                    col_clusters.update_one({"name": {"$regex": f"^{re.escape(topic_name)}$", "$options": "i"}}, {"$addToSet": {"example_reviews": labeled_id}})
+
+            # помечаем raw как processed
+            col_raw.update_one({"_id": self.raw["_id"]}, {"$set": {"status": "processed", "processed_at": now_iso()}})
+
             QtWidgets.QMessageBox.information(self, "Сохранено", f"Обновлено (id: {labeled_id})")
             self.close()
         except Exception as e:
@@ -438,18 +399,17 @@ def process_verification_phase():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
     while True:
-        to_verify = col_labeled.insert_one({"status": "draft",
-                                            "labeled_by": {"$ne": user}})
+        to_verify = col_labeled.find_one({"status": "draft", "labeled_by": {"$ne": user}})
         if not to_verify:
             print("Нет draft для верификации")
             break
-        raw_doc = col_labeled.find_one({"_id": to_verify["raw_review_id"]})
+
+        raw_doc = col_raw.find_one({"_id": to_verify["raw_review_id"]})
         if not raw_doc:
-            col_labeled.update_one({"_id": to_verify["_id"]},
-                                   {"$set": {"status": "orphan"}})
+            col_labeled.update_one({"_id": to_verify["_id"]}, {"$set": {"status": "orphan"}})
             continue
 
-        win = UpdateLabelinngWindow(raw_doc, topics_list, sentiments_list, to_verify)
+        win = UpdateLabelingWindow(raw_doc, topics_list, sentiments_list, to_verify)
         win.show()
         app.exec_()
 
