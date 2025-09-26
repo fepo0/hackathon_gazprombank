@@ -39,35 +39,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def create_session():
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    retry_strategy = Retry(
-        total=5,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS"]
-    )
-
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-
-    return session
-
-def parse_date(raw_date: str) -> datetime:
-    if not raw_date:
-        return None
-
-    try:
-        if "T" in raw_date:
-            return datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-        return datetime.strptime(raw_date, "%Y-%m-%d %H:%M:%S")
-    except Exception:
-        logger.warning(f"Не удалось распарсить дату: {raw_date}")
-        return None
-
 COOKIES = (
     "_flpt_sso_auth_user_in_segment=on; "
     "_flpt_percent_zone=10; "
@@ -118,11 +89,39 @@ HEADERS = {
     "Pragma": "no-cache"
 }
 
+def create_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    retry_strategy = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+
+    return session
+
+def parse_date(raw_date: str) -> datetime:
+    if not raw_date:
+        return None
+
+    try:
+        if "T" in raw_date:
+            return datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        return datetime.strptime(raw_date, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        logger.warning(f"Не удалось распарсить дату: {raw_date}")
+        return None
+
 def clean_html(raw_html: str) -> str:
     if not raw_html:
         return None
     return BeautifulSoup(raw_html, "html.parser").get_text(" ", strip=True)
-
 
 def extract_product_code(href: str) -> str:
     if not href:
@@ -140,47 +139,39 @@ def extract_product_code(href: str) -> str:
     return None
 
 def get_filters(session=None):
-    logger.info("Находим все доступные фильтры(услуги) ")
+    logger.info("Список услуг (фильтры) на сайте.")
 
-    try:
-        if session is None:
-            session = requests.Session()
-            session.headers.update(HEADERS)
+    filters = {
+        "Дебетовая карта": "debitcards",
+        "Кредитная карта": "creditcards",
+        "Ипотека": "hypothec",
+        "Автокредит": "autocredits",
+        "Потребительский кредит": "credits",
+        "Реструктуризация/рефинансирование": "restructing",
+        "Вклад": "deposits",
+        "Денежный перевод": "transfers",
+        "Дистанционное обслуживание физических лиц": "remote",
+        "Другое(физ.лица)": "other",
+        "Мобильное приложение": "mobile_app",
+        "Обслуживание филических лиц": "individual",
+        "Рассчетно-кассовое обслуживание": "rko",
+        "Эквайринг": "acquiring",
+        "Зарплатный проект": "salary_project",
+        "Депозит": "businessdeposits",
+        "Кредитование бизнеса": "businesscredits",
+        "Банковская гарантия": "bank_guarantee",
+        "Лизинг": "leasing",
+        "Другое": "business_other",
+        "Дистанционное обслуживание юридических лиц": "business_remote",
+        "Бизнес мобильное приложение": "business_mobile_app",
+        "Обслуживание юридических лиц": "legal"
+    }
 
-        r = session.get(CONFIG.start_url, timeout=30, verify=False)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
+    logger.info(f"Загружено {len(filters)} услуг")
+    for name, code in filters.items():
+        logger.info(f"  - {name}: {code}")
 
-        filters = {}
-        all_links = soup.find_all('a', href=True)
-
-        for link in all_links:
-            href = link.get('href', '')
-            text = link.get_text(strip=True)
-
-            product_code = extract_product_code(href)
-            if product_code and text and text not in filters:
-                filters[text] = product_code
-                logger.debug(f"Найден фильтр: '{text}' -> '{product_code}'")
-
-        filters["Все"] = None
-
-        logger.info(f"Найдено фильтров: {len(filters)}")
-        for name, code in filters.items():
-            logger.info(f"  - {name}: {code}")
-
-        return filters
-
-    except Exception as e:
-        logger.error(f"Ошибка получения фильтров: {e}")
-        return {
-            "Все": None,
-            "Дебетовые карты": "debitcards",
-            "Кредиты": "credits",
-            "Ипотека": "mortgage",
-            "Вклады": "deposits"
-        }
-
+    return filters
 
 def connect_to_mongodb():
     try:
@@ -195,19 +186,33 @@ def connect_to_mongodb():
         logger.error(f"Ошибка подключения к MongoDB: {e}")
         return None, None
 
-
 def save_review_to_mongo(collection, review_data):
     try:
-        result = collection.update_one(
-            {"url": review_data["url"]},
-            {"$setOnInsert": review_data},
-            upsert=True
-        )
-        return result.upserted_id is not None
-    except Exception as e:
-        logger.error(f"Ошибка сохранения в MongoDB: {e}")
-        return False
+        filter_query = {"url": review_data["url"]}
 
+        existing = collection.find_one(filter_query)
+
+        if existing:
+            existing_services = existing.get("service_types", [])
+            new_service = review_data["service_type"]
+
+            if new_service not in existing_services:
+                existing_services.append(new_service)
+                logger.debug(f"Добавлена услуга '{new_service}' к отзыву: {review_data['url']}")
+                return False
+            else:
+                logger.debug(f"Услуга '{new_service}' уже есть в отзыве: {review_data['url']}")
+                return False
+        else:
+            review_data["service_types"] = [review_data["service_type"]]
+            del review_data["service_type"]
+
+            logger.debug(f"Новый отзыв сохранен: {review_data['url']}")
+            return True
+
+    except Exception as e:
+        logger.error(f"Ошибка сохранения отзыва: {e}")
+        return False
 
 def create_review_data(item, service_name):
     date_str = item.get("dateCreate") or item.get("published_at") or item.get("created_at")
@@ -236,6 +241,7 @@ def fetch_reviews_for_service(service_name, product_code, collection, session=No
     page = 1
     saved_to_mongo = 0
     skipped_duplicates = 0
+    service_processed = 0
 
     while True:
         params = {
@@ -253,7 +259,7 @@ def fetch_reviews_for_service(service_name, product_code, collection, session=No
             r = session.get(CONFIG.ajax_url, params=params, timeout=60, verify=False)
 
             if r.status_code != 200:
-                logger.warning(f"Код ответа {r.status_code} – прекращаем.")
+                logger.warning(f"Код ответа {r.status_code} - завершение работы.")
                 break
 
             data = r.json()
@@ -264,6 +270,8 @@ def fetch_reviews_for_service(service_name, product_code, collection, session=No
                 break
 
             for item in items:
+                if service_processed >= 2000:
+                    break
                 review_data = create_review_data(item, service_name)
 
                 if collection is not None:
@@ -271,8 +279,12 @@ def fetch_reviews_for_service(service_name, product_code, collection, session=No
                         saved_to_mongo += 1
                     else:
                         skipped_duplicates += 1
+                service_processed += 1
 
             logger.info(f"Собрано {len(items)} отзывов на странице {page}")
+            if service_processed >= 2000:
+                logger.info(f"Достигнут лимит 2000 отзывов для '{service_name}'.")
+                break
             page += 1
             time.sleep(1.5)
 
@@ -292,9 +304,8 @@ def fetch_reviews_for_service(service_name, product_code, collection, session=No
 
     return saved_to_mongo, skipped_duplicates
 
-
 def main():
-    logger.info("Сбор отзывов через API в MongoDB")
+    logger.info("Сбор отзывов в MongoDB...")
     session = create_session()
 
     try:
@@ -302,7 +313,7 @@ def main():
         client, collection = connect_to_mongodb()
 
         if collection is None:
-            logger.error("Не удалось подключиться к MongoDB. Завершение работу.")
+            logger.error("Не удалось подключиться к MongoDB.")
             return
 
         total_saved = 0
