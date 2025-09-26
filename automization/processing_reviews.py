@@ -181,14 +181,20 @@ class LabelinngWindow(QtWidgets.QWidget):
         layout.addWidget(text_area)
 
         # Услуги (товары) + чекбоксы
+        NUM_COLS = 3
+
         topics_groupbox = QtWidgets.QGroupBox("Услуги (товары), выберите те, что относятся к отзыву")
-        topics_layout = QtWidgets.QVBoxLayout()
-        for tdoc in self.topics_list:
+        topics_layout = QtWidgets.QGridLayout()
+
+        for i, tdoc in enumerate(self.topics_list):
             tname = tdoc.get("name")
             cb = QtWidgets.QCheckBox(tname)
             cb.stateChanged.connect(lambda state, name=tname: self.on_topic_toggled(name, state))
-            topics_layout.addWidget(cb)
+            row = i // NUM_COLS
+            col = i % NUM_COLS
+            topics_layout.addWidget(cb, row, col)
             self.topic_checkboxes[tname] = cb
+
         topics_groupbox.setLayout(topics_layout)
         layout.addWidget(topics_groupbox)
 
@@ -323,7 +329,7 @@ def process_all_unprocessed_reviews():
         if not raw_doc:
             print("Нет unprocessed отзывов")
             break
-        print(f"Обработка: {raw_doc['id']}")
+        print(f"Обработка: {raw_doc['_id']}")
 
         win = LabelinngWindow(raw_doc, topics_list, sentiments_list)
         win.show()
