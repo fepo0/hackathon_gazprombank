@@ -3,10 +3,8 @@ import sys
 import re
 
 from datetime import datetime
-from dateutil import tz
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
-from bson.objectid import ObjectId
 from PyQt5 import QtWidgets, QtCore
 
 # Авторизация
@@ -120,12 +118,6 @@ def save_labeled(raw_doc, selected_topics_names, selected_sentiments_labels):
 # GUI
 class LabelinngWindow(QtWidgets.QWidget):
     def __init__(self, raw_doc, topics_list, sentiments_list, prefill=None):
-        """
-        :param raw_doc: кейс из reviews_raw
-        :param topics_list: список topics
-        :param sentiments_list: список sentiments
-        :param prefill: проверка верификации
-        """
         super().__init__()
         self.raw = raw_doc
         self.topics_list = topics_list
@@ -140,19 +132,16 @@ class LabelinngWindow(QtWidgets.QWidget):
         self.setWindowTitle("Обработка")
         layout = QtWidgets.QVBoxLayout()
 
-        # Заголовок
         title_label = QtWidgets.QLabel(f"<b>{self.raw.get('title', '(Нет заголовка)')}</b>")
         title_label.setWordWrap(True)
         layout.addWidget(title_label)
 
-        # Текст + скролл
         text_area = QtWidgets.QPlainTextEdit()
         text_area.setPlainText(self.raw.get("text", ""))
         text_area.setReadOnly(True)
         text_area.setFixedHeight(200)
         layout.addWidget(text_area)
 
-        # Услуги (товары) + чекбоксы
         NUM_COLS = 3
 
         topics_groupbox = QtWidgets.QGroupBox("Услуги (товары), выберите те, что относятся к отзыву")
@@ -170,21 +159,17 @@ class LabelinngWindow(QtWidgets.QWidget):
         topics_groupbox.setLayout(topics_layout)
         layout.addWidget(topics_groupbox)
 
-        # Область выбора
         sel_groupbox = QtWidgets.QGroupBox("Выбранные услуги (товары) и тональности")
         self.sel_layout = QtWidgets.QVBoxLayout()
         sel_groupbox.setLayout(self.sel_layout)
         layout.addWidget(sel_groupbox)
 
-        # Предварительное заполнение (по возможности)
         if self.prefill.get("topics"):
             for name, sentiment in zip(self.prefill.get("topics", []), self.prefill.get("sentiments", [])):
-                # После галочек настроения
                 if name in self.topic_checkboxes:
                     self.topic_checkboxes[name].setChecked(True)
                 QtCore.QTimer.singleShot(100, lambda n=name, s=sentiment: self.set_prefill_sentiment(n, s))
 
-        # Кнопка сохранения
         bth_save = QtWidgets.QPushButton("Сохранить")
         bth_save.clicked.connect(self.on_save)
         layout.addWidget(bth_save)
@@ -203,13 +188,11 @@ class LabelinngWindow(QtWidgets.QWidget):
                 self.remove_selected_row(name)
 
     def add_selected_row(self, name):
-        # + Горизонтальный блок
         hbox = QtWidgets.QHBoxLayout()
         lbl = QtWidgets.QLabel(name)
         lbl.setFixedWidth(300)
         hbox.addWidget(lbl)
 
-        # Настроение + радиокнопки
         bg = QtWidgets.QButtonGroup(self)
         radios = []
         for sdoc in self.sentiments_list:
@@ -218,13 +201,11 @@ class LabelinngWindow(QtWidgets.QWidget):
             hbox.addWidget(rb)
             radios.append(rb)
 
-        # По умолчанию нейтрально
         for rb in radios:
             if rb.text().lower() in ["нейтрально", "нейтральный"]:
                 rb.setChecked(True)
                 break
 
-        # Контейнер
         container = QtWidgets.QWidget()
         container.setLayout(hbox)
         container.setObjectName(f"sel_row_{name}")
@@ -233,7 +214,6 @@ class LabelinngWindow(QtWidgets.QWidget):
         self.topic_sentiments[name] = bg
 
     def remove_selected_row(self, name):
-        # Удалить контейнер
         for i in range(self.sel_layout.count()):
             w = self.sel_layout.itemAt(i).widget()
             if w and w.objectName() == f"sel_row_{name}":
@@ -244,7 +224,6 @@ class LabelinngWindow(QtWidgets.QWidget):
             del self.topic_sentiments[name]
 
     def set_prefill_sentiment(self, name, sentiment_label):
-        # Поставить нужный радиобатон
         bg = self.topic_sentiments.get(name)
         if not bg:
             return
@@ -348,9 +327,8 @@ def process_all_unprocessed_reviews():
 
     print("Готово. Все кейсы обработаны и проверены")
 
-class UpdateLabelingWindow(LabelinngWindow):  # или LabelingWindow если переименовали
+class UpdateLabelingWindow(LabelinngWindow):
     def __init__(self, raw_doc, topics_list, sentiments_list, labeled_doc):
-        # prefill — используем existing topics/sentiments
         super().__init__(raw_doc, topics_list, sentiments_list, prefill={"topics": labeled_doc.get("topics", []), "sentiments": labeled_doc.get("sentiments", [])})
         self.labeled_doc = labeled_doc
 
@@ -364,7 +342,6 @@ class UpdateLabelingWindow(LabelinngWindow):  # или LabelingWindow если �
             return
 
         try:
-            # Обновляем существующую запись (вместо вставки)
             col_labeled.update_one(
                 {"_id": self.labeled_doc["_id"]},
                 {"$set": {
@@ -375,7 +352,6 @@ class UpdateLabelingWindow(LabelinngWindow):  # или LabelingWindow если �
                     "verified_at": now_iso()
                 }}
             )
-            # добавим labeled_id в кластеры (как при сохранении)
             labeled_id = self.labeled_doc["_id"]
             for topic_name in topics:
                 topic_doc = col_topics.find_one({"name": topic_name})
@@ -384,7 +360,6 @@ class UpdateLabelingWindow(LabelinngWindow):  # или LabelingWindow если �
                 else:
                     col_clusters.update_one({"name": {"$regex": f"^{re.escape(topic_name)}$", "$options": "i"}}, {"$addToSet": {"example_reviews": labeled_id}})
 
-            # помечаем raw как processed
             col_raw.update_one({"_id": self.raw["_id"]}, {"$set": {"status": "processed", "processed_at": now_iso()}})
 
             QtWidgets.QMessageBox.information(self, "Сохранено", f"Обновлено (id: {labeled_id})")

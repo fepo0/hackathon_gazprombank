@@ -1,75 +1,345 @@
 import os
-import sys
 import joblib
+import random
+import re
+from collections import defaultdict
 
-from pymongo.mongo_client import MongoClient
-from pymongo.server_api import ServerApi
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
+from sklearn.preprocessing import LabelEncoder
 
-# БД
-user = input("Введите свой username: ").strip()
-path = "autorization.txt"
-uri = None
+NEGATORS = [
+    "не", "ни", "без", "никак", "никогда", "ниразу", "ни разу", "нисколько",
+]
 
-if path in os.listdir(os.getcwd()):
-    with open(file=path, mode="r", encoding="utf-8") as file:
-        text = file.read().strip()
-        for line in text.splitlines():
-            parts = line.strip().split(":", 1)
-            if len(parts) != 2:
-                continue
-            if parts[0] == user:
-                password = parts[1]
-                uri = (f"mongodb+srv://{user}:{password}@myclaster.qwyjq9x.mongodb.net/?"
-                       f"retryWrites=true&w=majority&appName=myclaster")
-                break
+SARCASM_HINTS = [
+    "спасибо за", "ну конечно", "ну да", "ага", "как же", "очень удобно", "очень быстро",
+]
+
+NEGATIVE_CUES = [
+    "зависает", "тормозит", "лагает", "не работает", "ошибка", "сбой", "проблема",
+    "подвисает", "крашится", "вылетает", "падает", "долго", "медленно", "невозможно",
+]
+
+POSITIVE_CUES = [
+    "быстро", "работает", "удобно", "понравилось", "отлично", "хорошо", "стабильно",
+]
+
+
+def preprocess_text(text):
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"[0-9!#()$,\\'\\-\\.*+/:;<=>?@[\\]^_`{|}\\\"]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    text = text.lower().strip()
+    tokens = re.split(r"(\s+)", text)
+    out = []
+    negate = False
+    for tok in tokens:
+        low = tok.strip()
+        if low in NEGATORS:
+            negate = True
+            out.append(low)
+            continue
+        if re.search(r"[\.!?;,]", tok):
+            negate = False
+            out.append(tok)
+            continue
+        if negate and re.match(r"\w+", low):
+            out.append(f"{low}_neg")
         else:
-            print("Нет такого username в базе")
+            out.append(tok)
+    return "".join(out).strip()
 
-if uri is None:
-    print("Нет uri")
-    sys.exit(1)
 
-client = MongoClient(uri, server_api=ServerApi("1"))
-db = client["banki_db"]
+def create_sentiment_patterns():
+    positive_patterns = [
+        "отлично", "прекрасно", "замечательно", "хорошо", "хороший", "хорошая", "хорошее", "хорошие",
+        "понравилось", "понравился", "понравилась", "понравилось", "нравится", "нравился", "нравилась",
+        "удобно", "удобный", "удобная", "удобное", "удобные",
+        "быстро", "быстрый", "быстрая", "быстрое", "быстрые",
+        "качественно", "качественный", "качественная", "качественное", "качественные",
+        "профессионально", "профессиональный", "профессиональная", "профессиональное", "профессиональные",
+        "вежливо", "вежливый", "вежливая", "вежливое", "вежливые",
+        "доброжелательно", "доброжелательный", "доброжелательная", "доброжелательное", "доброжелательные",
 
-col_labeled = db["reviews_labeled"]
-col_sentiments = db["sentiments"]
+        "рекомендую", "рекомендуем", "советую", "советуем", "спасибо", "благодарю", "благодарим",
 
-sentiments = [s["label"] for s in col_sentiments.find({})]
+        "работает", "работает хорошо", "работает отлично", "работает прекрасно",
+        "функционирует", "функционирует хорошо", "функционирует отлично",
 
-X, y = [], []
-docs = list(col_labeled.find({}))
+        "обслуживание хорошее", "обслуживание отличное", "персонал хороший", "персонал отличный",
+        "условия хорошие", "условия отличные", "тарифы хорошие", "тарифы отличные",
+        "сервис хороший", "сервис отличный", "поддержка хорошая", "поддержка отличная",
 
-for d in docs:
-    text = (d.get("title", "") + " " + d.get("text", "")).strip()
-    topics = d.get("topics", [])
-    sent = d.get("sentiments", [])
-    for t, s in zip(topics, sent):
-        X.append(f"{text} [TOPIC:{t}]")
-        y.append(s)
+        "доволен", "довольна", "довольны", "удовлетворен", "удовлетворена", "удовлетворены",
+        "приятно", "приятный", "приятная", "приятное", "приятные",
 
-# Обучение, тестирование
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        "замечательный", "замечательная", "замечательное", "замечательные",
+        "превосходно", "превосходный", "превосходная", "превосходное", "превосходные",
+        "идеально", "идеальный", "идеальная", "идеальное", "идеальные",
+        "супер", "суперский", "суперская", "суперское", "суперские",
 
-# Модель
-clf = Pipeline([
-    ("tfidf", TfidfVectorizer(max_features=20000, ngram_range=(1, 2))),
-    ("clf", LogisticRegression(max_iter=200))
-])
+        "выгодно", "выгодный", "выгодная", "выгодное", "выгодные",
+        "доступно", "доступный", "доступная", "доступное", "доступные",
+        "надежно", "надежный", "надежная", "надежное", "надежные",
+        "стабильно", "стабильный", "стабильная", "стабильное", "стабильные"
+    ]
 
-clf.fit(X_train, y_train)
+    negative_patterns = [
+        "плохо", "плохой", "плохая", "плохое", "плохие",
+        "ужасно", "ужасный", "ужасная", "ужасное", "ужасные",
+        "не понравилось", "не понравился", "не понравилась", "не нравится", "не нравился", "не нравилась",
+        "неудобно", "неудобный", "неудобная", "неудобное", "неудобные",
+        "медленно", "медленный", "медленная", "медленное", "медленные",
+        "некачественно", "некачественный", "некачественная", "некачественное", "некачественные",
+        "непрофессионально", "непрофессиональный", "непрофессиональная", "непрофессиональное", "непрофессиональные",
+        "грубо", "грубый", "грубая", "грубое", "грубые",
+        "невежливо", "невежливый", "невежливая", "невежливое", "невежливые",
 
-# Оценка
-y_pred = clf.predict(X_test)
-print(classification_report(y_test, y_pred, target_names=sentiments))
+        "не работает", "не функционирует", "сломался", "сломалась", "сломались",
+        "зависает", "зависает постоянно", "тормозит", "тормозит постоянно",
+        "глючит", "глючит постоянно", "багает", "багает постоянно",
+        "ошибка", "ошибки", "сбой", "сбои", "проблема", "проблемы",
 
-# Сохранение
-os.makedirs("models", exist_ok=True)
-joblib.dump(clf, "models/sentiment_model.pkl")
+        "обслуживание плохое", "обслуживание ужасное", "персонал плохой", "персонал ужасный",
+        "условия плохие", "условия ужасные", "тарифы плохие", "тарифы ужасные",
+        "сервис плохой", "сервис ужасный", "поддержка плохая", "поддержка ужасная",
 
-print("Модель по тональностям сохранена в models/sentiment_model.pkl")
+        "недоволен", "недовольна", "недовольны", "неудовлетворен", "неудовлетворена", "неудовлетворены",
+        "неприятно", "неприятный", "неприятная", "неприятное", "неприятные",
+        "разочарован", "разочарована", "разочарованы", "разочарование",
+
+        "ужасный", "ужасная", "ужасное", "ужасные",
+        "кошмар", "кошмарный", "кошмарная", "кошмарное", "кошмарные",
+        "отвратительно", "отвратительный", "отвратительная", "отвратительное", "отвратительные",
+        "отвратно", "отвратный", "отвратная", "отвратное", "отвратные",
+
+        "невыгодно", "невыгодный", "невыгодная", "невыгодное", "невыгодные",
+        "недоступно", "недоступный", "недоступная", "недоступное", "недоступные",
+        "ненадежно", "ненадежный", "ненадежная", "ненадежное", "ненадежные",
+        "нестабильно", "нестабильный", "нестабильная", "нестабильное", "нестабильные",
+        "заблокировали", "заблокировали без причины", "заморозили", "заморозили без причины",
+        "отказали", "отказали без объяснений", "не одобрили", "не одобрили без причин"
+    ]
+
+    neutral_patterns = [
+        "нормально", "нормальный", "нормальная", "нормальное", "нормальные",
+        "обычно", "обычный", "обычная", "обычное", "обычные",
+        "стандартно", "стандартный", "стандартная", "стандартное", "стандартные",
+        "типично", "типичный", "типичная", "типичное", "типичные",
+        "средне", "средний", "средняя", "среднее", "средние",
+        "приемлемо", "приемлемый", "приемлемая", "приемлемое", "приемлемые",
+        "удовлетворительно", "удовлетворительный", "удовлетворительная", "удовлетворительное", "удовлетворительные",
+
+        "информация", "информирование", "уведомление", "уведомления",
+        "документы", "документооборот", "справка", "справки",
+        "условия", "условия использования", "тарифы", "тарифный план",
+        "процедура", "процедуры", "процесс", "процессы",
+
+        "время", "срок", "сроки", "период", "периоды",
+        "быстро", "медленно", "своевременно", "несвоевременно",
+
+        "операция", "операции", "транзакция", "транзакции",
+        "счет", "счета", "баланс", "остаток", "остатки",
+        "комиссия", "комиссии", "процент", "проценты", "ставка", "ставки"
+    ]
+
+    return {
+        "положительно": positive_patterns,
+        "отрицательно": negative_patterns,
+        "нейтрально": neutral_patterns
+    }
+
+
+def create_synthetic_training_data():
+    sentiment_patterns = create_sentiment_patterns()
+
+    banking_topics = {
+        "Мобильное приложение": [
+            "приложение", "мобильный банк", "интерфейс", "функции", "удобство",
+            "зависает", "тормозит", "работает", "не работает", "скачать",
+            "установить", "обновить", "версия", "баг", "ошибка"
+        ],
+        "Обслуживание": [
+            "персонал", "менеджер", "консультант", "отделение", "очередь",
+            "вежливость", "сотрудник", "работник", "консультация", "помощь",
+            "поддержка", "сервис", "качество обслуживания"
+        ],
+        "Дебетовая карта": [
+            "карта", "пластик", "снятие", "пополнение", "лимит", "cashback",
+            "терминал", "банкомат", "pin-код", "блокировка", "разблокировка"
+        ],
+        "Кредитная карта": [
+            "кредитка", "кредитный лимит", "проценты", "погашение",
+            "минимальный платеж", "льготный период"
+        ],
+        "Вклад": [
+            "депозит", "процентная ставка", "срок", "пополнение",
+            "досрочное снятие", "капитализация", "вклад"
+        ],
+        "Кредит": [
+            "займ", "одобрение", "процентная ставка", "ежемесячный платеж",
+            "срок кредита", "залог", "кредит"
+        ],
+        "Ипотека": [
+            "ипотечный кредит", "первоначальный взнос", "ставка", "срок",
+            "недвижимость", "оценка", "ипотека"
+        ],
+        "Денежные переводы": [
+            "перевод", "комиссия", "сроки", "получатель", "сумма",
+            "реквизиты", "перевод денег"
+        ],
+        "Автокредит": [
+            "автокредит", "машина", "автомобиль", "страховка",
+            "первоначальный взнос"
+        ],
+        "Эквайринг": [
+            "эквайринг", "терминал", "оплата картой", "pos-терминал",
+            "прием карт", "торговый терминал"
+        ]
+    }
+
+    texts = []
+    labels = []
+
+    for topic, topic_keywords in banking_topics.items():
+        for sentiment, sentiment_words in sentiment_patterns.items():
+            for _ in range(60):
+                topic_words = random.sample(topic_keywords, random.randint(1, 3))
+
+                sentiment_words_sample = random.sample(sentiment_words, random.randint(1, 3))
+
+                sentence_parts = []
+
+                sentence_parts.extend(sentiment_words_sample)
+
+                sentence_parts.extend(topic_words)
+
+                additional_words = [
+                    "в", "на", "с", "по", "для", "от", "до", "за", "под", "над",
+                    "очень", "довольно", "достаточно", "совсем", "абсолютно",
+                    "мне", "мне", "нам", "нам", "клиентам", "пользователям"
+                ]
+
+                if random.random() > 0.5:
+                    sentence_parts.extend(random.sample(additional_words, random.randint(1, 2)))
+
+                random.shuffle(sentence_parts)
+
+                text = " ".join(sentence_parts)
+
+                processed_text = preprocess_text(text)
+
+                if processed_text:
+                    texts.append(processed_text)
+                    labels.append(sentiment)
+
+            if sentiment == "отрицательно":
+                hints = [
+                    f"{random.choice(topic_keywords)} {random.choice(NEGATIVE_CUES)}",
+                    f"постоянно {random.choice(NEGATIVE_CUES)} {random.choice(topic_keywords)}",
+                    f"ну конечно {random.choice(topic_keywords)} {random.choice(NEGATIVE_CUES)}",
+                ]
+                for h in hints:
+                    texts.append(preprocess_text(h))
+                    labels.append("отрицательно")
+            if sentiment == "положительно":
+                hints = [
+                    f"{random.choice(topic_keywords)} {random.choice(POSITIVE_CUES)}",
+                    f"всё {random.choice(POSITIVE_CUES)} с {random.choice(topic_keywords)}",
+                    f"спасибо за {random.choice(topic_keywords)} — теперь {random.choice(POSITIVE_CUES)}",
+                ]
+                for h in hints:
+                    texts.append(preprocess_text(h))
+                    labels.append("положительно")
+
+    return texts, labels
+
+
+def main():
+    print("Создание синтетических данных для анализа тональности...")
+
+    X, y = create_synthetic_training_data()
+
+    print(f"Создано {len(X)} синтетических примеров")
+    print(f"Распределение тональности:")
+    sentiment_counts = defaultdict(int)
+    for label in y:
+        sentiment_counts[label] += 1
+    for sentiment, count in sentiment_counts.items():
+        print(f"  {sentiment}: {count}")
+
+    label_encoder = LabelEncoder()
+    y_encoded = label_encoder.fit_transform(y)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+    )
+
+    print("Обучение модели анализа тональности...")
+    word_vec = TfidfVectorizer(
+        max_features=15000,
+        ngram_range=(1, 2),
+        min_df=2,
+        max_df=0.95,
+        analyzer="word",
+    )
+    char_vec = TfidfVectorizer(
+        max_features=8000,
+        analyzer="char_wb",
+        ngram_range=(3, 5)
+    )
+    clf = Pipeline([
+        ("features", FeatureUnion([
+            ("word", word_vec),
+            ("char", char_vec),
+        ])),
+        ("clf", LogisticRegression(
+            max_iter=1500,
+            class_weight="balanced",
+            random_state=42,
+            n_jobs=None,
+        ))
+    ])
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    print("\nПроизводительность модели:")
+    print(classification_report(y_test, y_pred, target_names=label_encoder.classes_))
+
+    os.makedirs("models", exist_ok=True)
+    joblib.dump(clf, "models/sentiment_model_sklearn.pkl")
+    joblib.dump(label_encoder, "models/sentiment_label_encoder.pkl")
+
+    print("Модель анализа тональности сохранена в models/sentiment_model_sklearn.pkl")
+    print("Кодировщик меток сохранен в models/sentiment_label_encoder.pkl")
+
+    print("\nТестирование с примерами:")
+    test_examples = [
+        "очень понравилось обслуживание в отделении",
+        "мобильное приложение постоянно зависает",
+        "карта работает нормально",
+        "кредит одобрили быстро",
+        "персонал грубый и невежливый",
+        "вклад с хорошей ставкой",
+        "переводы работают медленно",
+        "ипотека на выгодных условиях",
+        "ну да, очень удобно, когда приложение зависает",
+        "спасибо за обновление — теперь карта не работает",
+    ]
+
+    for example in test_examples:
+        processed_example = preprocess_text(example)
+        pred_class = clf.predict([processed_example])[0]
+        pred_label = label_encoder.inverse_transform([pred_class])[0]
+        pred_proba = clf.predict_proba([processed_example])[0]
+        confidence = pred_proba[pred_class]
+        print(f"'{example}' -> {pred_label} (уверенность: {confidence:.3f})")
+
+
+if __name__ == "__main__":
+    main()
